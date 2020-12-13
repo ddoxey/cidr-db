@@ -1,18 +1,33 @@
 #!/bin/bash
-
+#
+# This script demonstrates the CLI in action.
+#
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-cli="build/bin/cidrdb_cli"
-cidr_list="data/sample-cidrs.list"
-cidr_db="$(sed 's/[.]list/.cdb/' <<< "$cidr_list")"
+CLI="build/bin/cidrdb_cli"
+CIDR_LIST="data/sample-cidrs.list"
+CIDR_DB="$(sed 's/[.]list/.db/' <<< "$CIDR_LIST")"
 
-rm -f $cidr_db 2>/dev/null
+for file in $CLI $CIDR_LIST
+do
+    if [[ ! -f $file ]]
+    then
+        echo "No such file: $file" >&2 && exit 1
+    fi
+done
 
-for cidr in $(cat $cidr_list)
+rm -f $CIDR_DB 2>/dev/null
+
+for cidr in $(cat $CIDR_LIST)
 do
     ip="$(sed 's|[.]0/[0-9]\+|.10|' <<< "$cidr")"
 
-    got=$($cli --in $cidr_list --db $cidr_db --ip "$ip")
+    if [[ "$1" == "-v" ]]
+    then
+        echo -e "\n$CLI --in $CIDR_LIST --db $CIDR_DB --ip $ip"
+    fi
+
+    got=$($CLI --in $CIDR_LIST --db $CIDR_DB --ip "$ip")
 
     if [[ "$got" == "$cidr" ]]
     then
