@@ -30,3 +30,7 @@
 *.exe
 *.out
 *.app
+
+# Build & test artifacts
+build/*
+data/*.db
