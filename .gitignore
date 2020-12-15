@@ -31,6 +31,9 @@
 *.out
 *.app
 
+# temp files
+*.swp
+
 # Build & test artifacts
 build/*
 data/*.db

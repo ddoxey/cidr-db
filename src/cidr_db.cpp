@@ -18,8 +18,10 @@ namespace cidr
      * @param boost::filesystem::path indicates path to compiled CIDR datafile
      */
     db::db(const fs::path &db_filename)
+        : db_filename(db_filename)
     {
-        read(db_filename);
+        if (fs::exists(db_filename) && fs::file_size(db_filename) > 0)
+            read(db_filename);
     }
 
     /**
@@ -28,20 +30,20 @@ namespace cidr
      * @param std::string IP address
      * @param vector<string> to store CIDR results
      */
-    void db::lookup(const std::string &ip_address, std::vector<std::string> &results)
+    void db::lookup(const std::string &ip_address, std::vector<std::string> &results) const
     {
         const char* DEBUG = std::getenv("DEBUG");
 
         in_addr_t ip_bits = ip_to_addr_bits(ip_address);
 
-        for (size_t offset = 1; offset <= 32; offset++)
+        for (size_t offset = 0; offset < 32; offset++)
         {
-            if (cidrs[offset - 1] == 0)
+            if (cidrs[offset] == 0)
                 continue;
 
             in_addr_t shifted_bits = ip_bits >> offset;
 
-            if (cidrs[offset - 1].get()->count(shifted_bits) == 0)
+            if (cidrs[offset].get()->count(shifted_bits) == 0)
                 continue;
 
             in_addr_t unshifted_bits = shifted_bits << offset;
@@ -49,14 +51,10 @@ namespace cidr
             if (DEBUG)
             {
                 std::cerr
-                    << "found: "
+                    << " found: "
                     << shifted_bits
-                    << std::endl
-                    << "["
-                    << std::bitset<32>(unshifted_bits)
-                    << "] <= ["
-                    << std::bitset<32>(shifted_bits)
-                    << "]"
+                    << "/"
+                    << offset
                     << std::endl;
             }
 
@@ -66,6 +64,130 @@ namespace cidr
 
             results.push_back(cidr.str());
         }
+    }
+
+    /**
+     * Method to add a new CIDR to the in-memory database.
+     *
+     * @param std::string CIDR
+     */
+    void db::put(const std::string &cidr)
+    {
+        std::vector<std::string> parts;
+        ba::split(parts, cidr, boost::is_any_of("/"));
+
+        in_addr_t addr_bits = ip_to_addr_bits(parts[0]);
+        size_t offset = 32 - boost::lexical_cast<size_t>(parts[1].c_str());
+
+        in_addr_t shifted_bits = addr_bits >> offset;
+
+        if (cidrs[offset] == 0)
+            cidrs[offset] = std::shared_ptr<std::set<in_addr_t>>(
+                new std::set<in_addr_t>
+            );
+
+        cidrs[offset].get()->insert(shifted_bits);
+    }
+
+    /**
+     * Method to remove a CIDR from the in-memory database.
+     *
+     * @param std::string CIDR
+     */
+    void db::del(const std::string &cidr)
+    {
+        std::vector<std::string> parts;
+        ba::split(parts, cidr, boost::is_any_of("/"));
+
+        in_addr_t addr_bits = ip_to_addr_bits(parts[0]);
+        size_t offset = 32 - boost::lexical_cast<size_t>(parts[1].c_str());
+
+        in_addr_t shifted_bits = addr_bits >> offset;
+
+        if (cidrs[offset] == 0)
+            return;
+
+        for (auto it = cidrs[offset].get()->begin();
+                  it != cidrs[offset].get()->end();
+                  it++)
+        {
+            if ( *it == shifted_bits )
+            {
+                cidrs[offset].get()->erase(it);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Method to verfiy a CIDR exists in the in-memory database.
+     *
+     * @param std::string CIDR
+     */
+    bool db::has(const std::string &cidr) const
+    {
+        const char* DEBUG = std::getenv("DEBUG");
+
+        std::vector<std::string> parts;
+        ba::split(parts, cidr, boost::is_any_of("/"));
+
+        in_addr_t addr_bits = ip_to_addr_bits(parts[0]);
+        size_t offset = 32 - boost::lexical_cast<size_t>(parts[1].c_str());
+
+        in_addr_t shifted_bits = addr_bits >> offset;
+
+        if (cidrs[offset] == 0)
+            return false;
+
+        if (DEBUG)
+        {
+            std::cerr
+                << "   has: "
+                << shifted_bits
+                << "/"
+                << offset
+                << " [" << std::bitset<32>(shifted_bits) << "]"
+                << std::endl;
+        }
+
+        return cidrs[offset].get()->count(shifted_bits) > 0;
+    }
+
+    /**
+     * Method to commit changes to in-memory database to disk.
+     */
+    void db::commit() const
+    {
+        const char* DEBUG = std::getenv("DEBUG");
+
+        std::ofstream dbfile(db_filename.c_str(), std::ios::out|std::ios::binary);
+
+        for (size_t offset = 0; offset < 32; offset++)
+        {
+            if (cidrs[offset] == 0)
+                continue;
+
+            std::for_each(cidrs[offset]->begin(),
+                          cidrs[offset]->end(),
+            [&dbfile, &offset, &DEBUG](in_addr_t shifted_bits)
+            {
+                if (DEBUG)
+                {
+                    std::cerr
+                        << "commit: "
+                        << shifted_bits
+                        << "/"
+                        << offset
+                        << " [" << std::bitset<32>(shifted_bits) << "]"
+                        << std::endl;
+                }
+
+                dbfile.write(reinterpret_cast<char*>( &offset ), sizeof offset);
+                dbfile.write(reinterpret_cast<char*>( &shifted_bits ), sizeof shifted_bits);
+            });
+        }
+
+        dbfile.close();
     }
 
     /**
@@ -94,6 +216,7 @@ namespace cidr
             if (DEBUG)
             {
                 std::cerr
+                    << "  read: "
                     << shifted_bits
                     << "/"
                     << offset
@@ -101,14 +224,15 @@ namespace cidr
                     << std::endl;
             }
 
-            offset -= 1;
-
             if (cidrs[offset] == 0)
                 cidrs[offset] = std::shared_ptr<std::set<in_addr_t>>(
                     new std::set<in_addr_t>
                 );
 
             cidrs[offset].get()->insert(shifted_bits);
+
+            offset = 0;
+            shifted_bits = 0;
         }
 
         infile.close();
@@ -132,7 +256,7 @@ namespace cidr
 
         std::string cidr;
         in_addr_t shifted_bits;
-        in_addr_t cidr_bits;
+        in_addr_t addr_bits;
         size_t offset;
 
         while (infile >> cidr)
@@ -140,7 +264,7 @@ namespace cidr
             std::vector<std::string> parts;
             ba::split(parts, cidr, boost::is_any_of("/"));
 
-            cidr_bits = ip_to_addr_bits(parts[0]);
+            addr_bits = ip_to_addr_bits(parts[0]);
             offset = 32 - boost::lexical_cast<size_t>(parts[1].c_str());
 
             if (DEBUG)
@@ -149,16 +273,16 @@ namespace cidr
                     << parts[0]
                     << " -> "
                     << "["
-                    << std::bitset<32>(cidr_bits)
+                    << std::bitset<32>(addr_bits)
                     << "]"
                     << std::endl;
             }
 
-            if (cidr_bits == 0) continue;
+            if (addr_bits == 0) continue;
 
             if (32 < offset || offset < 1) continue;
 
-            shifted_bits = cidr_bits >> offset;
+            shifted_bits = addr_bits >> offset;
 
             if (DEBUG)
             {
@@ -169,7 +293,7 @@ namespace cidr
                     << ")"
                     << std::endl
                     << "["
-                    << std::bitset<32>(cidr_bits)
+                    << std::bitset<32>(addr_bits)
                     << "] => ["
                     << std::bitset<32>(shifted_bits)
                     << "]"
