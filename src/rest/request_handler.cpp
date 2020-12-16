@@ -1,3 +1,6 @@
+/// REST Service Interface for CIDR-DB
+///
+/// Derived from:
 ///
 /// \file request_handler.cpp
 ///
@@ -11,6 +14,7 @@
 ///
 
 #include "request_handler.hpp"
+#include <iostream>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -27,178 +31,313 @@ namespace ba = boost::algorithm;
 namespace http {
 namespace server {
 
+/**
+ * This request handler supports the following CIDR-DB operations:
+ *
+ *     GET     /           -- status
+ *     POST    /           -- batch lookup
+ *     GET     /<ip>       -- single lookup
+ *     GET     /<ip>/<int> -- has (verify)
+ *     PUT     /<ip>/<int> -- add/update
+ *     DELETE  /<ip>/<int> -- delete
+ */
+std::string determine_op(const std::vector<std::string> &path_tokens,
+                       const std::string &method)
+{
+    size_t token_count = std::count_if(path_tokens.begin(), path_tokens.end(),
+        [](auto token) { return token != ""; });
+
+    // path: /
+    if (token_count == 0)
+    {
+        if (method == "GET")
+            return "Status";  // get the CIDR-DB status
+
+        if (method == "POST")
+            return "Batch-Lookup";  // lookup CIDRs for multiple IPs
+    }
+    // path: /<ip>
+    else if (token_count == 1)
+    {
+        if (method == "GET")
+            return "Single-Lookup";  // lookup CIDRs for an IP
+    }
+    // path: /<ip>/<int>
+    else if (token_count == 2)
+    {
+        if (method == "GET")
+            return "Verify";  // verify CIDR present
+
+        if (method == "PUT")
+            return "Add";     // add a new CIDR
+
+        if (method == "DELETE")
+            return "Delete";  // delete a CIDR
+    }
+
+    return "Invalid";
+}
+
 request_handler::request_handler(std::shared_ptr<cidr::db> &cidr_db)
-  : cidr_db_(cidr_db)
-  { }
+    : cidr_db_(cidr_db)
+    { }
 
 void request_handler::handle_request(const request &req, reply &rep)
 {
-  // decode URI to path
-  std::string request_path;
-  if (!url_decode(req.uri, request_path))
-  {
-    reply::stock_reply(reply::bad_request, rep);
-    return;
-  }
+    std::string request_path;
+    std::string accept_type(mime_types::extension_to_type("json"));
 
-  // the only URI path supported is: /
-  if (request_path != "/")
-  {
-    reply::stock_reply(reply::not_found, rep);
-    return;
-  }
-
-  std::string accept_type(mime_types::extension_to_type("json"));
-
-  auto accept_header = std::find_if(req.headers.begin(), req.headers.end(),
-    [](auto &header) { return header.name == "Accept"; });
-
-  if (accept_header != req.headers.end())
-    accept_type = accept_header[0].value;
-
-  if (   accept_type != mime_types::extension_to_type("json")
-      && accept_type != mime_types::extension_to_type("yaml"))
-  {
-    rep.status = reply::bad_request;
-    rep.content.append("Unsupported content type: ");
-    rep.content.append(accept_type);
-    rep.content.append("\n\n");
-    rep.content.append("Supported types include:");
-    rep.content.append("\n  - ");
-    rep.content.append(mime_types::extension_to_type("json"));
-    rep.content.append("\n  - ");
-    rep.content.append(mime_types::extension_to_type("yaml"));
-    rep.content.append("\n");
-    rep.headers.resize(2);
-    rep.headers[0].name = "Content-Length";
-    rep.headers[0].value = std::to_string(rep.content.size());
-    rep.headers[1].name = "Content-Type";
-    rep.headers[1].value = mime_types::extension_to_type("txt");
-    return;
-  }
-
-  if (req.method == "GET")
-  {
-    rep.status = reply::ok;
-    rep.content.append("{\"status\":\"OK\"}\n");
-    rep.headers.resize(2);
-    rep.headers[0].name = "Content-Length";
-    rep.headers[0].value = std::to_string(rep.content.size());
-    rep.headers[1].name = "Content-Type";
-    rep.headers[1].value = mime_types::extension_to_type("json");
-    return;
-  }
-
-  if (req.method == "POST")
-  {
-    // Decode and tokenize the content part of the POST request
-    std::string content;
-    if (!url_decode(req.content, content))
+    if (!url_decode(req.uri, request_path))
     {
         reply::stock_reply(reply::bad_request, rep);
         return;
     }
 
-    std::vector<std::string> lines;
-    ba::split(lines, content, b::is_any_of("\r\n"));
+    auto accept_header = std::find_if(req.headers.begin(), req.headers.end(),
+        [](auto &header) { return header.name == "Accept"; });
 
-    if (accept_type == mime_types::extension_to_type("json"))
+    if (accept_header != req.headers.end())
+        accept_type = accept_header[0].value;
+
+    if (   accept_type != mime_types::extension_to_type("json")
+        && accept_type != mime_types::extension_to_type("yaml"))
     {
-        rep.content.append("[");
-
-        std::string comma1("");
-        std::for_each(lines.begin(), lines.end(),
-            [&comma1, &rep, this](std::string &ip)
-            {
-                if (ip.empty()) return;
-
-                std::string valid("false");
-                std::vector<std::string> results;
-
-                if (cidr::db::valid_ip(ip))
-                {
-                    valid = "true";
-                    cidr_db_.get()->lookup(ip, results);
-                }
-
-                rep.content.append(comma1);
-                rep.content.append("{\"ip\":\"");
-                rep.content.append(ip);
-                rep.content.append("\",\"valid\":");
-                rep.content.append(valid);
-                rep.content.append(",\"cidrs\":[");
-
-                std::string comma2("");
-                std::for_each(results.begin(), results.end(),
-                    [&comma2, &rep](std::string &cidr)
-                    {
-                        rep.content.append(comma2);
-                        rep.content.append("\"");
-                        rep.content.append(cidr);
-                        rep.content.append("\"");
-                        comma2 = ",";
-                    }
-                );
-
-                rep.content.append("]}");
-                comma1 = ",";
-            }
-        );
-
-        rep.content.append("]\n");
+        rep.status = reply::bad_request;
+        rep.content.append("Unsupported content type: ");
+        rep.content.append(accept_type);
+        rep.content.append("\n\n");
+        rep.content.append("Supported types include:");
+        rep.content.append("\n  - ");
+        rep.content.append(mime_types::extension_to_type("json"));
+        rep.content.append("\n  - ");
+        rep.content.append(mime_types::extension_to_type("yaml"));
+        rep.content.append("\n");
+        rep.headers.resize(2);
+        rep.headers[0].name = "Content-Length";
+        rep.headers[0].value = std::to_string(rep.content.size());
+        rep.headers[1].name = "Content-Type";
+        rep.headers[1].value = mime_types::extension_to_type("txt");
+        return;
     }
-    else if (accept_type == mime_types::extension_to_type("yaml"))
+
+    std::vector<std::string> path_tokens;
+    ba::split(path_tokens, request_path, b::is_any_of("/"));
+    std::remove_if(path_tokens.begin(), path_tokens.end(),
+        [](auto token) { return token == ""; });
+
+    std::string op_type(determine_op(path_tokens, req.method));
+
+    if (op_type == "Invalid")
     {
-        rep.content.append("---\n");
-
-        std::for_each(lines.begin(), lines.end(),
-            [&rep, this](std::string &ip)
-            {
-                if (ip.empty()) return;
-
-                std::string valid("false");
-                std::vector<std::string> results;
-
-                if (cidr::db::valid_ip(ip))
-                {
-                    valid = "true";
-                    cidr_db_.get()->lookup(ip, results);
-                }
-
-                rep.content.append("-  ip: ");
-                rep.content.append(ip);
-                rep.content.append("\n");
-                rep.content.append("   valid: ");
-                rep.content.append(valid);
-                rep.content.append("\n");
-                rep.content.append("   cidrs:\n");
-
-                std::for_each(results.begin(), results.end(),
-                    [&rep](std::string &cidr)
-                    {
-                        rep.content.append("   - ");
-                        rep.content.append(cidr);
-                        rep.content.append("\n");
-                    }
-                );
-            }
-        );
+        reply::stock_reply(reply::not_found, rep);
+        return;
+    }
+    else if (op_type == "Status")
+    {
+        if (accept_type == mime_types::extension_to_type("json"))
+        {
+            rep.content.append("{\"status\":\"OK\"}");
+        }
+        else if (accept_type == mime_types::extension_to_type("yaml"))
+        {
+            rep.content.append("---\n");
+            rep.content.append("status: OK\n");
+        }
 
         rep.content.append("\n");
+        rep.headers.resize(3);
+        rep.headers[0].name = "X-Operation";
+        rep.headers[0].value = op_type;
+        rep.headers[1].name = "Content-Length";
+        rep.headers[1].value = std::to_string(rep.content.size());
+        rep.headers[2].name = "Content-Type";
+        rep.headers[2].value = accept_type;
+        rep.status = reply::ok;
+        return;
+    }
+    else if (op_type == "Batch-Lookup" || op_type == "Single-Lookup")
+    {
+        std::vector<std::string> lines;
+
+        if (op_type == "Batch-Lookup")
+        {
+            std::string content;
+            if (!url_decode(req.content, content))
+            {
+                reply::stock_reply(reply::bad_request, rep);
+                return;
+            }
+
+            ba::split(lines, content, b::is_any_of("\r\n"));
+        }
+        else if (op_type == "Single-Lookup")
+        {
+            lines.push_back(path_tokens[0]);
+        }
+
+        if (lines.size() < 1)
+        {
+            reply::stock_reply(reply::bad_request, rep);
+            return;
+        }
+
+        if (accept_type == mime_types::extension_to_type("json"))
+        {
+            rep.content.append("[");
+
+            std::string comma1("");
+            std::for_each(lines.begin(), lines.end(),
+                [&comma1, &rep, this](std::string &ip)
+                {
+                    if (ip.empty()) return;
+
+                    std::string valid("false");
+                    std::vector<std::string> results;
+
+                    if (cidr::db::valid_ip(ip))
+                    {
+                        valid = "true";
+                        cidr_db_.get()->lookup(ip, results);
+                    }
+
+                    rep.content.append(comma1);
+                    rep.content.append("{\"ip\":\"");
+                    rep.content.append(ip);
+                    rep.content.append("\",\"valid\":");
+                    rep.content.append(valid);
+                    rep.content.append(",\"cidrs\":[");
+
+                    std::string comma2("");
+                    std::for_each(results.begin(), results.end(),
+                        [&comma2, &rep](std::string &cidr)
+                        {
+                            rep.content.append(comma2);
+                            rep.content.append("\"");
+                            rep.content.append(cidr);
+                            rep.content.append("\"");
+                            comma2 = ",";
+                        }
+                    );
+
+                    rep.content.append("]}");
+                    comma1 = ",";
+                }
+            );
+
+            rep.content.append("]");
+        }
+        else if (accept_type == mime_types::extension_to_type("yaml"))
+        {
+            rep.content.append("---\n");
+
+            std::for_each(lines.begin(), lines.end(),
+                [&rep, this](std::string &ip)
+                {
+                    if (ip.empty()) return;
+
+                    std::string valid("false");
+                    std::vector<std::string> results;
+
+                    if (cidr::db::valid_ip(ip))
+                    {
+                        valid = "true";
+                        cidr_db_.get()->lookup(ip, results);
+                    }
+
+                    rep.content.append("-  ip: ");
+                    rep.content.append(ip);
+                    rep.content.append("\n");
+                    rep.content.append("   valid: ");
+                    rep.content.append(valid);
+                    rep.content.append("\n");
+                    rep.content.append("   cidrs:\n");
+
+                    std::for_each(results.begin(), results.end(),
+                        [&rep](std::string &cidr)
+                        {
+                            rep.content.append("   - ");
+                            rep.content.append(cidr);
+                            rep.content.append("\n");
+                        }
+                    );
+                }
+            );
+        }
+
+        rep.content.append("\n");
+        rep.headers.resize(3);
+        rep.headers[0].name = "X-Operation";
+        rep.headers[0].value = op_type;
+        rep.headers[1].name = "Content-Length";
+        rep.headers[1].value = std::to_string(rep.content.size());
+        rep.headers[2].name = "Content-Type";
+        rep.headers[2].value = accept_type;
+        rep.status = reply::ok;
+
+        return;
+    }
+    else if (op_type == "Verify" || op_type == "Add" || op_type == "Delete")
+    {
+        std::string cidr(path_tokens[0]
+                       + "/"
+                       + path_tokens[1]);
+
+        if (!cidr::db::valid_cidr(cidr))
+        {
+            reply::stock_reply(reply::bad_request, rep);
+            return;
+        }
+
+        if (op_type == "Add")
+        {
+            cidr_db_.get()->put(cidr);
+            cidr_db_.get()->commit();
+        }
+        else if (op_type == "Delete")
+        {
+            cidr_db_.get()->del(cidr);
+            cidr_db_.get()->commit();
+        }
+
+        std::string present(cidr_db_.get()->has(cidr) ? "true" : "false");
+
+        if (accept_type == mime_types::extension_to_type("json"))
+        {
+            rep.content.append("{\"cidr\":\"");
+            rep.content.append(cidr);
+            rep.content.append("\",\"valid\": true,");
+            rep.content.append("\"present\":");
+            rep.content.append(present);
+            rep.content.append("}");
+        }
+        else if (accept_type == mime_types::extension_to_type("yaml"))
+        {
+            rep.content.append("---\n");
+            rep.content.append("cidr: ");
+            rep.content.append(cidr);
+            rep.content.append("\n");
+            rep.content.append("valid: true");
+            rep.content.append("\n");
+            rep.content.append("present: ");
+            rep.content.append(present);
+            rep.content.append("\n");
+        }
+
+        rep.content.append("\n");
+        rep.headers.resize(3);
+        rep.headers[0].name = "X-Operation";
+        rep.headers[0].value = op_type;
+        rep.headers[1].name = "Content-Length";
+        rep.headers[1].value = std::to_string(rep.content.size());
+        rep.headers[2].name = "Content-Type";
+        rep.headers[2].value = accept_type;
+        rep.status = reply::ok;
+
+        return;
     }
 
-    rep.headers.resize(2);
-    rep.headers[0].name = "Content-Length";
-    rep.headers[0].value = std::to_string(rep.content.size());
-    rep.headers[1].name = "Content-Type";
-    rep.headers[1].value = accept_type;
-    rep.status = reply::ok;
-
+    reply::stock_reply(reply::bad_request, rep);
     return;
-  }
-
-  reply::stock_reply(reply::bad_request, rep);
-  return;
 }
 
 bool request_handler::url_decode(const std::string &in, std::string &out)
@@ -243,7 +382,7 @@ bool request_handler::url_decode(const std::string &in, std::string &out)
 
 void request_handler::query_tokenize(const std::string& in, params_map& out)
 {
-  bool        in_option_name = true;
+  bool in_option_name = true;
   std::string option_name;
   std::string option_value;
 
