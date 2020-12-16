@@ -28,6 +28,7 @@ namespace cidr
 
         static void build(const fs::path &infilename, const fs::path &dbfilename);
         static bool valid_ip(const std::string &ip_address);
+        static bool valid_cidr(const std::string &cidr);
 
     private:
         fs::path db_filename;

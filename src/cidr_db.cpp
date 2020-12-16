@@ -322,6 +322,31 @@ namespace cidr
     }
 
     /**
+     * Static function to validate a string as a legitimate CIDR.
+     *
+     * @param std::string representing a CIDR
+     * @return bool
+     */
+    bool db::valid_cidr(const std::string &cidr)
+    {
+        std::vector<std::string> parts;
+        ba::split(parts, cidr, boost::is_any_of("/"));
+
+        if (!valid_ip(parts[0]))
+            return false;
+
+        size_t range = -1;
+
+        try
+        {
+            range = boost::lexical_cast<size_t>(parts[1].c_str());
+        }
+        catch (const boost::bad_lexical_cast &e) { }
+
+        return range > 0 && range <= 32;
+    }
+
+    /**
      * Convert an IPv4 address to a host byte order int binary.
      *
      * @param std::string IPv4 address
