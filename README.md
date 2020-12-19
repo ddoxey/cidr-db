@@ -10,7 +10,9 @@ IPv4 address.
 
 # test
 
-./test.sh
+./test_cidrdb_crud
+
+./test_rest.sh
 
 # CLI
 
